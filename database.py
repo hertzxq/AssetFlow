@@ -6,8 +6,7 @@ async def init_db():
         await db.execute('''
             CREATE TABLE IF NOT EXISTS categories (
                 id INTEGER PRIMARY KEY,
-                name TEXT,
-                gender TEXT
+                name TEXT
             )
         ''')
         await db.execute('''
@@ -17,7 +16,9 @@ async def init_db():
                 name TEXT,
                 description TEXT,
                 price REAL,
-                photo TEXT
+                photo TEXT,
+                asset_url TEXT,
+                is_free INTEGER DEFAULT 0
             )
         ''')
         await db.execute('''
@@ -51,46 +52,46 @@ async def init_db():
             )
         ''')
         await db.commit()
-
-async def get_categories(gender=None):
+async def get_categories(section=None):
     async with aiosqlite.connect('bot.db') as db:
-        if gender:
-            query = 'SELECT id, name FROM categories WHERE gender=?'
-            args = (gender,)
+        if section:
+            async with db.execute('SELECT id, name FROM categories WHERE section=?', (section,)) as cursor:
+                return await cursor.fetchall()
         else:
-            query = 'SELECT id, name FROM categories'
-            args = ()
-        async with db.execute(query, args) as cursor:
-            return await cursor.fetchall()
+            async with db.execute('SELECT id, name FROM categories') as cursor:
+                return await cursor.fetchall()
 
-async def add_category(name, gender):
+
+async def add_category(name, section):
     async with aiosqlite.connect('bot.db') as db:
-        await db.execute('INSERT INTO categories (name, gender) VALUES (?, ?)', (name, gender))
+        await db.execute('INSERT INTO categories (name, section) VALUES (?, ?)', (name, section))
         await db.commit()
 
 async def get_products_by_category(category_id):
     async with aiosqlite.connect('bot.db') as db:
         async with db.execute(
-            'SELECT id, category_id, name, description, price, photo FROM products WHERE category_id=?',
+            'SELECT id, category_id, name, description, price, photo, asset_url FROM products WHERE category_id=?',
             (category_id,)
         ) as cursor:
             return await cursor.fetchall()
 
+async def add_product(category_id, name, description, price, photo, asset_url, is_free):
+    async with aiosqlite.connect('bot.db') as db:
+        await db.execute(
+            '''INSERT INTO products (category_id, name, description, price, photo, asset_url, is_free)
+               VALUES (?, ?, ?, ?, ?, ?, ?)''',
+            (category_id, name, description, price, photo, asset_url, is_free)
+        )
+        await db.commit()
+
 async def get_product(product_id):
     async with aiosqlite.connect('bot.db') as db:
         async with db.execute(
-            'SELECT id, category_id, name, description, price, photo FROM products WHERE id=?',
+            'SELECT id, category_id, name, description, price, photo, asset_url, is_free FROM products WHERE id=?',
             (product_id,)
         ) as cursor:
             return await cursor.fetchone()
 
-async def add_product(category_id, name, description, price, photo):
-    async with aiosqlite.connect('bot.db') as db:
-        await db.execute(
-            'INSERT INTO products (category_id, name, description, price, photo) VALUES (?, ?, ?, ?, ?)',
-            (category_id, name, description, price, photo)
-        )
-        await db.commit()
 
 async def delete_category(category_id):
     async with aiosqlite.connect('bot.db') as db:
@@ -158,19 +159,6 @@ async def create_order(user_id, data):
 
     await clear_cart(user_id)
     return order_id
-
-async def get_pending_orders():
-    async with aiosqlite.connect('bot.db') as db:
-        async with db.execute(
-            'SELECT id, user_id, status, delivery_method, payment_method, total_price, name, phone, city FROM orders WHERE status="pending"'
-        ) as cursor:
-            return [
-                {
-                    'id': row[0], 'user_id': row[1], 'status': row[2],
-                    'delivery_method': row[3], 'payment_method': row[4],
-                    'total_price': row[5], 'name': row[6], 'phone': row[7], 'city': row[8]
-                } for row in await cursor.fetchall()
-            ]
 
 async def get_order_items(order_id):
     async with aiosqlite.connect('bot.db') as db:
