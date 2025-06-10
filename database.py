@@ -4,9 +4,16 @@ from datetime import datetime
 async def init_db():
     async with aiosqlite.connect('bot.db') as db:
         await db.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                balance REAL DEFAULT 0.0
+            )
+        ''')
+        await db.execute('''
             CREATE TABLE IF NOT EXISTS categories (
                 id INTEGER PRIMARY KEY,
-                name TEXT
+                name TEXT,
+                section TEXT
             )
         ''')
         await db.execute('''
@@ -34,12 +41,8 @@ async def init_db():
                 id INTEGER PRIMARY KEY,
                 user_id INTEGER,
                 status TEXT,
-                delivery_method TEXT,
                 payment_method TEXT,
                 total_price REAL,
-                name TEXT,
-                phone TEXT,
-                city TEXT,
                 created_at TEXT
             )
         ''')
@@ -51,7 +54,59 @@ async def init_db():
                 price_at_purchase REAL
             )
         ''')
+        # Migrate existing orders table if it contains unused columns
+        try:
+            async with db.execute('PRAGMA table_info(orders)') as cursor:
+                columns = [row[1] for row in await cursor.fetchall()]
+            if 'delivery_method' in columns or 'name' in columns or 'phone' in columns or 'city' in columns:
+                await db.execute('ALTER TABLE orders RENAME TO orders_old')
+                await db.execute('''
+                    CREATE TABLE orders (
+                        id INTEGER PRIMARY KEY,
+                        user_id INTEGER,
+                        status TEXT,
+                        payment_method TEXT,
+                        total_price REAL,
+                        created_at TEXT
+                    )
+                ''')
+                await db.execute('''
+                    INSERT INTO orders (id, user_id, status, payment_method, total_price, created_at)
+                    SELECT id, user_id, status, payment_method, total_price, created_at
+                    FROM orders_old
+                ''')
+                await db.execute('DROP TABLE orders_old')
+        except aiosqlite.Error:
+            pass  # Ignore if migration fails (e.g., table doesn't exist yet)
         await db.commit()
+
+async def get_user_balance(user_id):
+    async with aiosqlite.connect('bot.db') as db:
+        async with db.execute('SELECT balance FROM users WHERE user_id=?', (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return row[0]
+            else:
+                await db.execute('INSERT INTO users (user_id, balance) VALUES (?, 0.0)', (user_id,))
+                await db.commit()
+                return 0.0
+
+async def update_user_balance(user_id, amount):
+    async with aiosqlite.connect('bot.db') as db:
+        async with db.execute('SELECT balance FROM users WHERE user_id=?', (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                new_balance = row[0] + amount
+                if new_balance < 0:
+                    return False
+                await db.execute('UPDATE users SET balance=? WHERE user_id=?', (new_balance, user_id))
+            else:
+                if amount < 0:
+                    return False
+                await db.execute('INSERT INTO users (user_id, balance) VALUES (?, ?)', (user_id, amount))
+            await db.commit()
+            return True
+
 async def get_categories(section=None):
     async with aiosqlite.connect('bot.db') as db:
         if section:
@@ -60,7 +115,6 @@ async def get_categories(section=None):
         else:
             async with db.execute('SELECT id, name FROM categories') as cursor:
                 return await cursor.fetchall()
-
 
 async def add_category(name, section):
     async with aiosqlite.connect('bot.db') as db:
@@ -91,7 +145,6 @@ async def get_product(product_id):
             (product_id,)
         ) as cursor:
             return await cursor.fetchone()
-
 
 async def delete_category(category_id):
     async with aiosqlite.connect('bot.db') as db:
@@ -138,13 +191,18 @@ async def create_order(user_id, data):
         product = await get_product(item['product_id'])
         total_price += product[4] * item['quantity']
 
+    balance = await get_user_balance(user_id)
+    if balance < total_price:
+        return None, "Недостаточно средств на балансе. 💸 Пожалуйста, пополните баланс."
+
     async with aiosqlite.connect('bot.db') as db:
+        await db.execute('UPDATE users SET balance=balance-? WHERE user_id=?', (total_price, user_id))
+
         async with db.execute('''
-            INSERT INTO orders (user_id, status, delivery_method, payment_method, total_price, name, phone, city, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO orders (user_id, status, payment_method, total_price, created_at)
+            VALUES (?, ?, ?, ?, ?)
         ''', (
-            user_id, 'pending', data['delivery_method'], data['payment_method'],
-            total_price, data['name'], data['phone'], data['city'], datetime.now().isoformat()
+            user_id, 'pending', data.get('payment_method', 'Unknown'), total_price, datetime.now().isoformat()
         )) as cursor:
             order_id = cursor.lastrowid
 
@@ -158,7 +216,7 @@ async def create_order(user_id, data):
         await db.commit()
 
     await clear_cart(user_id)
-    return order_id
+    return order_id, None
 
 async def get_order_items(order_id):
     async with aiosqlite.connect('bot.db') as db:

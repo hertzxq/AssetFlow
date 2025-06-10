@@ -4,10 +4,6 @@ class CatalogStates(StatesGroup):
     browsing_category = State()
 
 class OrderStates(StatesGroup):
-    name = State()
-    phone = State()
-    city = State()
-    delivery_method = State()
     payment_method = State()
 
 class SupportStates(StatesGroup):
@@ -19,8 +15,13 @@ class AddProductStates(StatesGroup):
     description = State()
     price = State()
     photo = State()
-    asset_url = State()
+    asset_file = State()  # Changed from asset_url to asset_file
 
 class AddCategoryStates(StatesGroup):
     name = State()
     section = State()
+
+class AddBalanceStates(StatesGroup):
+    user_id = State()
+    balance_amount = State()
+    payment_method = State()
