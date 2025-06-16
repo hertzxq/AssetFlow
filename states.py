@@ -15,7 +15,7 @@ class AddProductStates(StatesGroup):
     description = State()
     price = State()
     photo = State()
-    asset_file = State()  # Changed from asset_url to asset_file
+    asset_file = State()
 
 class AddCategoryStates(StatesGroup):
     name = State()
@@ -24,4 +24,8 @@ class AddCategoryStates(StatesGroup):
 class AddBalanceStates(StatesGroup):
     user_id = State()
     balance_amount = State()
+
+class UserAddBalanceStates(StatesGroup):
+    amount = State()
     payment_method = State()
+    yookassa_payment = State()

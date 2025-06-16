@@ -1,7 +1,9 @@
-from aiogram import types
+from aiogram import types, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
-from states import CatalogStates, OrderStates, SupportStates, AddProductStates, AddCategoryStates, AddBalanceStates
+from main import bot
+from states import CatalogStates, OrderStates, SupportStates, AddProductStates, AddCategoryStates, AddBalanceStates, \
+    UserAddBalanceStates
 from database import get_categories, get_products_by_category, get_product, add_to_cart, get_cart_items, clear_cart, \
     create_order, get_order_items, add_category, add_product, delete_category, delete_product, get_user_balance, \
     update_user_balance
@@ -9,11 +11,11 @@ from config import ADMIN_ID
 import aiosqlite
 import logging
 import asyncio
+import requests
 
 logging.basicConfig(level=logging.INFO)
 
-from main import bot
-
+# Главное меню
 main_menu = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Каталог 📋", callback_data="catalog")],
     [InlineKeyboardButton(text="Корзина 🛒", callback_data="cart")],
@@ -22,16 +24,19 @@ main_menu = InlineKeyboardMarkup(inline_keyboard=[
 ])
 
 
+# Фильтр для администратора
 class AdminFilter:
     async def __call__(self, message: types.Message) -> bool:
         return message.from_user.id == ADMIN_ID
 
 
+# Обработчик команды /start
 async def cmd_start(message: types.Message):
     await message.answer("Привет! 👋 Я твой бот для поиска моделей/ассетов и всего разного из мира 3д! 🤖",
                          reply_markup=main_menu)
 
 
+# Показать каталог
 async def show_catalog(callback: types.CallbackQuery):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -49,17 +54,133 @@ async def show_catalog(callback: types.CallbackQuery):
     await callback.answer()
 
 
+# Показать баланс
 async def show_balance(callback: types.CallbackQuery):
     balance = await get_user_balance(callback.from_user.id)
-    await callback.message.answer(f"Ваш баланс: {balance:.2f} руб. 💰")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 Пополнить", callback_data="top_up_balance")],
+        [InlineKeyboardButton(text="⬅️ Вернуться", callback_data="back_to_menu")]
+    ])
+    await callback.message.edit_text(f"💸 Выберите способ пополнения\n20:53\n\n💰 Ваш баланс: {balance:.2f} руб.",
+                                     reply_markup=keyboard)
     await callback.answer()
 
 
+# Начало процесса пополнения баланса
+async def start_top_up_balance(callback: types.CallbackQuery, state: FSMContext):
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Ручной ввод", callback_data="manual_top_up")],
+        [InlineKeyboardButton(text="💸 СБП (Юкасса)", callback_data="yookassa_sbp")],
+        [InlineKeyboardButton(text="⬅️ Вернуться", callback_data="back_to_menu")]
+    ])
+    await callback.message.edit_text("Выберите способ пополнения:", reply_markup=keyboard)
+    await callback.answer()
+
+
+# Обработка ручного ввода суммы
+async def start_manual_top_up(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(UserAddBalanceStates.amount)
+    await callback.message.answer("Введите сумму для пополнения: 💰")
+    await callback.answer()
+
+
+# Обработка выбора оплаты через Юкассу и СБП
+async def start_yookassa_sbp(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(UserAddBalanceStates.amount)
+    await callback.message.answer("Введите сумму для пополнения через СБП (Юкасса): 💸")
+    await state.update_data(payment_method="yookassa_sbp")
+    await callback.answer()
+
+
+# Обработка суммы пополнения
+async def process_top_up_amount(message: types.Message, state: FSMContext):
+    try:
+        amount = float(message.text)
+        if amount <= 0:
+            await message.answer("Сумма должна быть положительной. ⚠️")
+            return
+        data = await state.get_data()
+        payment_method = data.get("payment_method", "manual")
+        user_id = message.from_user.id
+
+        if payment_method == "yookassa_sbp":
+            await state.update_data(amount=amount)
+            await state.set_state(UserAddBalanceStates.yookassa_payment)
+            payment_url = await create_yookassa_payment(user_id, amount)
+            if payment_url:
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="Оплатить через СБП", url=payment_url)],
+                    [InlineKeyboardButton(text="⬅️ Вернуться", callback_data="back_to_menu")]
+                ])
+                await message.answer(f"Перейдите по ссылке для оплаты {amount:.2f} руб. через СБП:\n{payment_url}",
+                                     reply_markup=keyboard)
+            else:
+                await message.answer("Ошибка при создании платежа. Попробуйте снова. ⚠️")
+                await state.clear()
+        else:
+            success = await update_user_balance(user_id, amount)
+            if success:
+                new_balance = await get_user_balance(user_id)
+                await message.answer(
+                    f"Баланс успешно пополнен на {amount:.2f} руб. ✅\nНовый баланс: {new_balance:.2f} руб. 💰")
+            else:
+                await message.answer("Ошибка при пополнении баланса. ⚠️")
+            await state.clear()
+    except ValueError:
+        await message.answer("Введите корректное число. ⚠️")
+
+
+# Создание платежа через Юкассу
+async def create_yookassa_payment(user_id, amount):
+    shop_id = "your_shop_id"  # Замените на ваш Shop ID от Юкассы
+    secret_key = "your_secret_key"  # Замените на ваш секретный ключ
+    url = "https://api.yookassa.ru/v3/payments"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Basic {secret_key}"
+    }
+    payload = {
+        "amount": {"value": f"{amount:.2f}", "currency": "RUB"},
+        "capture": True,
+        "description": f"Пополнение баланса для пользователя {user_id}",
+        "payment_method_data": {"type": "sbp"},
+        "confirmation": {
+            "type": "redirect",
+            "return_url": "https://your-bot-domain.com/return"  # Замените на ваш URL
+        },
+        "metadata": {"user_id": user_id}
+    }
+    response = requests.post(url, json=payload, headers=headers)
+    if response.status_code == 200:
+        return response.json().get("confirmation", {}).get("confirmation_url")
+    return None
+
+
+# Обработка возврата после оплаты через Юкассу
+async def handle_yookassa_return(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    amount = data.get("amount")
+    user_id = callback.from_user.id
+    success = True  # Замените на реальную проверку статуса платежа
+    if success:
+        await update_user_balance(user_id, amount)
+        new_balance = await get_user_balance(user_id)
+        await callback.message.answer(
+            f"Баланс успешно пополнен на {amount:.2f} руб. ✅\nНовый баланс: {new_balance:.2f} руб. 💰")
+    else:
+        await callback.message.answer("Ошибка при обработке оплаты. Попробуйте снова. ⚠️")
+    await state.clear()
+    await callback.answer()
+
+
+# Начало процесса пополнения баланса администратором
 async def start_add_balance(message: types.Message, state: FSMContext):
+    await state.clear()
     await state.set_state(AddBalanceStates.user_id)
     await message.answer("Введите ID пользователя для пополнения баланса: 🆔")
 
 
+# Обработка ID пользователя
 async def process_user_id(message: types.Message, state: FSMContext):
     try:
         user_id = int(message.text)
@@ -70,6 +191,7 @@ async def process_user_id(message: types.Message, state: FSMContext):
         await message.answer("Пожалуйста, введите корректный ID пользователя. ⚠️")
 
 
+# Обработка суммы пополнения администратором
 async def process_balance_amount(message: types.Message, state: FSMContext):
     try:
         amount = float(message.text)
@@ -90,6 +212,7 @@ async def process_balance_amount(message: types.Message, state: FSMContext):
         await message.answer("Введите корректное число. ⚠️")
 
 
+# Показать категории раздела
 async def show_section_categories(callback: types.CallbackQuery, state: FSMContext):
     section = callback.data.split("_")[-1]
     categories = await get_categories(section=section)
@@ -191,11 +314,26 @@ async def prev_product(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+# Добавление продукта в корзину (ограничение до 1 копии)
 async def add_to_cart_handler(callback: types.CallbackQuery):
     product_id = int(callback.data.split("_")[3])
     user_id = callback.from_user.id
-    await add_to_cart(user_id, product_id)
-    await callback.answer("Ассет добавлен в корзину! ✅")
+    cart_items = await get_cart_items(user_id)
+
+    # Проверяем, есть ли уже этот ассет в корзине
+    if any(item['product_id'] == product_id for item in cart_items):
+        await callback.answer("Этот ассет уже в корзине! Вы можете добавить только 1 копию. ✅", show_alert=True)
+    else:
+        await add_to_cart(user_id, product_id, quantity=1)  # Устанавливаем количество 1
+        await callback.answer("Ассет добавлен в корзину! ✅")
+        await callback.message.edit_text("Ассет добавлен в корзину. Что дальше?", reply_markup=main_menu)
+
+
+async def handle_random_text(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state and not message.text.startswith('/'):
+        await message.answer("Не понимаю ваш запрос. Пожалуйста, используйте кнопки или команды. 🔄",
+                             reply_markup=main_menu)
 
 
 async def send_asset_url(callback: types.CallbackQuery):
@@ -245,7 +383,6 @@ async def start_checkout(callback: types.CallbackQuery, state: FSMContext):
         return
     logging.info("Cart items retrieved: %s", cart_items)
 
-    # Асинхронное получение цен продуктов
     products = await asyncio.gather(*(get_product(item['product_id']) for item in cart_items))
     total_price = sum(product[4] * item['quantity'] for product, item in zip(products, cart_items))
     balance = await get_user_balance(user_id)
@@ -275,7 +412,6 @@ async def start_checkout(callback: types.CallbackQuery, state: FSMContext):
     )
     await bot.send_message(ADMIN_ID, admin_text)
 
-    # Подтверждение для пользователя
     await callback.message.answer(
         f"✅ Ваш заказ #{order_id} успешно оформлен! 🎉\nВаш баланс: {await get_user_balance(user_id):.2f} руб. 💳")
     for item in items:
@@ -303,9 +439,16 @@ async def start_add_product(message: types.Message, state: FSMContext):
     if not categories:
         await message.answer("Сначала добавьте категории с помощью /add_category. ⚠️")
         return
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=cat[1], callback_data=f"add_product_cat_{cat[0]}")] for cat in categories
-    ])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    for cat in categories:
+        category_id, category_name = cat
+        async with aiosqlite.connect('bot.db') as db:
+            async with db.execute('SELECT section FROM categories WHERE id=?', (category_id,)) as cursor:
+                row = await cursor.fetchone()
+                section = row[0] if row else "unknown"
+        button_text = f"{category_name} ({section})"
+        keyboard.inline_keyboard.append(
+            [InlineKeyboardButton(text=button_text, callback_data=f"add_product_cat_{category_id}")])
     await state.set_state(AddProductStates.category)
     await message.answer("Выберите категорию: 📋", reply_markup=keyboard)
 
@@ -326,8 +469,19 @@ async def process_product_name(message: types.Message, state: FSMContext):
 
 async def process_product_description(message: types.Message, state: FSMContext):
     await state.update_data(description=message.text)
-    await state.set_state(AddProductStates.price)
-    await message.answer("Введите цену ассета (0 для бесплатных): 💰")
+    data = await state.get_data()
+    category_id = data['category_id']
+
+    async with aiosqlite.connect('bot.db') as db:
+        async with db.execute('SELECT section FROM categories WHERE id=?', (category_id,)) as cursor:
+            row = await cursor.fetchone()
+            if row and row[0] == 'free':
+                await state.update_data(price=0.0, is_free=1)
+                await state.set_state(AddProductStates.photo)
+                await message.answer("Выберите фото ассета: 📸")
+            else:
+                await state.set_state(AddProductStates.price)
+                await message.answer("Введите цену ассета: 💰")
 
 
 async def process_product_price(message: types.Message, state: FSMContext):

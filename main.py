@@ -6,16 +6,16 @@ from aiogram.filters import Command
 from aiogram.filters.state import StateFilter
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommandScopeAllPrivateChats, BotCommand
-
 from config import BOT_TOKEN
 from database import init_db
 from middleware import TimeMiddleware
-from states import CatalogStates, AddProductStates, SupportStates, OrderStates, AddCategoryStates, AddBalanceStates
+from states import CatalogStates, AddProductStates, SupportStates, OrderStates, AddCategoryStates, AddBalanceStates, \
+    UserAddBalanceStates
 
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
-dp = Dispatcher(storage=MemoryStorage())  # Явно указываем хранилище состояний
+dp = Dispatcher(storage=MemoryStorage())
 
 dp.update.middleware(TimeMiddleware())
 
@@ -30,7 +30,8 @@ async def main():
     from handlers import process_product_description, process_product_price, process_product_photo
     from handlers import process_asset_file, invalid_asset_file, start_delete_category, confirm_delete_category
     from handlers import start_delete_product, show_products_for_deletion, confirm_delete_product
-    from handlers import show_balance, start_add_balance, process_user_id, process_balance_amount, AdminFilter
+    from handlers import show_balance, start_top_up_balance, process_top_up_amount, start_add_balance
+    from handlers import process_user_id, process_balance_amount, AdminFilter
 
     dp.message.register(cmd_start, Command("start"))
     dp.callback_query.register(show_catalog, F.data == "catalog")
@@ -63,6 +64,8 @@ async def main():
     dp.callback_query.register(show_products_for_deletion, F.data.startswith("select_delete_prod_cat_"))
     dp.callback_query.register(confirm_delete_product, F.data.startswith("delete_product_"))
     dp.callback_query.register(show_balance, F.data == "balance")
+    dp.callback_query.register(start_top_up_balance, F.data == "top_up_balance")
+    dp.message.register(process_top_up_amount, UserAddBalanceStates.amount)
     dp.message.register(start_add_balance, AdminFilter(), Command("add_balance"))
     dp.message.register(process_user_id, AddBalanceStates.user_id)
     dp.message.register(process_balance_amount, AddBalanceStates.balance_amount)
